@@ -1,0 +1,3 @@
+# Simulation logic using NetworkX, NumPy, Pandas
+
+# ...existing code...
