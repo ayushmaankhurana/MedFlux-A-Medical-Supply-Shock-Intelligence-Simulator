@@ -76,7 +76,12 @@ def generate_recommendations(plan):
     """
 
     recommendations = []
-
+    
+    for node,value in plan["buffers"].items():
+        if value >= 40:
+            recommendations.append(
+                f"Add alternate supplier upstream of {node}"
+            )
     for node, value in plan["buffers"].items():
         if value is None:
             continue
@@ -93,6 +98,23 @@ def generate_recommendations(plan):
 
     return recommendations
 
+import networkx as nx
+
+def find_critical_nodes(G, top_k=2):
+    """
+    Identify the most critical nodes in the network
+    using betweenness centrality
+    """
+
+    centrality = nx.betweenness_centrality(G)
+
+    sorted_nodes = sorted(
+        centrality.items(),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    return [node for node,_ in sorted_nodes[:top_k]]
 
 def run_optimizer(G, budget=100):
     """
@@ -103,7 +125,11 @@ def run_optimizer(G, budget=100):
 
     recommendations = generate_recommendations(plan)
 
+    critical_nodes = find_critical_nodes(G)
+
     return {
-        "optimization_plan": plan,
+        "buffers": plan["buffers"],
+        "capacity_upgrades": plan["capacity_upgrades"],
+        "critical_nodes": critical_nodes,
         "recommendations": recommendations
     }
