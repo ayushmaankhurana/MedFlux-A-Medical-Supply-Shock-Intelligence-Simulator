@@ -1,3 +1,0 @@
-// Main React app entry
-
-// ...existing code...

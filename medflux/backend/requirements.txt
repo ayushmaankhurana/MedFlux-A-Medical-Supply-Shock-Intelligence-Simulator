@@ -1,8 +1,0 @@
-fastapi
-uvicorn
-networkx
-numpy
-pandas
-scikit-learn
-xgboost
-pulp

@@ -1,3 +1,0 @@
-// UI controls for simulation
-
-// ...existing code...
