@@ -75,6 +75,17 @@ def optimize_network(G, budget=100, shelf_life_days=365):
     # Solve
     problem.solve()
 
+    # --- NEW: SAFETY CHECK ---
+    status = pulp.LpStatus[problem.status]
+    if status != 'Optimal':
+        print(f"Warning: PuLP Solver returned status: {status}. Returning safe defaults.")
+        # If the math is impossible, safely return zeros so the frontend doesn't crash
+        return {
+            "buffers": {n: 0.0 for n in nodes},
+            "capacity_upgrades": {n: 0.0 for n in nodes},
+            "edge_flows": {f"{u}->{v}": 0.0 for u, v in edges}
+        }
+
     # --- 4. EXTRACT RESULTS SAFELY ---
     buffer_plan = {n: buffer_vars[n].value() if buffer_vars[n].value() is not None else 0.0 for n in nodes}
     upgrade_plan = {n: capacity_upgrade[n].value() if capacity_upgrade[n].value() is not None else 0.0 for n in nodes}
