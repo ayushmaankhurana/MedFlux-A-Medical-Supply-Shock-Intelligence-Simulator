@@ -1,3 +1,9 @@
-// Axios API service for backend communication
+import axios from "axios";
 
-// ...existing code...
+const API = axios.create({
+  baseURL: "http://localhost:8000"
+});
+
+export const runSimulation = (network) => {
+  return API.post("/simulate", network);
+};
