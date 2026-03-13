@@ -2,7 +2,7 @@ import pulp
 import networkx as nx
 
 
-def optimize_network(G, budget=100):
+def optimize_network(G, budget=100, shelf_life_days=365):
     """
     Optimize supply chain resilience by allocating buffers
     and recommending capacity upgrades under a fixed budget.
@@ -28,10 +28,10 @@ def optimize_network(G, budget=100):
     # Optimization model
     problem = pulp.LpProblem("SupplyChain_Optimization", pulp.LpMaximize)
 
-    # Decision variables
+# Dynamic Decision variables
     buffer_vars = {
-        node: pulp.LpVariable(f"buffer_{node}", lowBound=0, upBound=50)
-        for node in nodes
+        n: pulp.LpVariable(f"buffer_{n}", lowBound=0, upBound=G.nodes[n]['max_capacity'])
+        for n in nodes
     }
 
     capacity_upgrade = {
@@ -39,23 +39,39 @@ def optimize_network(G, budget=100):
         for node in nodes
     }
 
-    # Costs
-    buffer_cost = 2
-    upgrade_cost = 30
-
-    # Budget constraint
+    # Dynamic Budget Constraint pulling from Frontend Data
     problem += (
-        pulp.lpSum(buffer_vars[n] * buffer_cost for n in nodes) +
-        pulp.lpSum(capacity_upgrade[n] * upgrade_cost for n in nodes)
+        pulp.lpSum(buffer_vars[n] * G.nodes[n]['holding_cost_per_unit'] for n in nodes) +
+        pulp.lpSum(capacity_upgrade[n] * G.nodes[n]['fixed_upgrade_cost'] for n in nodes)
         <= budget
     )
 
-    # Objective: prioritize critical nodes
-    problem += pulp.lpSum(
-        buffer_vars[n] * centrality[n] +
-        capacity_upgrade[n] * centrality[n] * 10
-        for n in nodes
-    )
+    spoilage_rate = 1.0 / shelf_life_days if shelf_life_days > 0 else 0
+    
+    # A multiplier to tune how aggressively the AI hates spoilage
+    spoilage_weight = 5.0 
+
+    # --- THE NEW OBJECTIVE FUNCTION ---
+    objective_terms = []
+
+    for n in nodes:
+        # 1. Base Score & Centrality
+        base_value = 0.1 
+        shock_bonus = 2.0 if G.nodes[n].get('is_shocked', False) else 0.0
+        node_score = base_value + centrality[n] + shock_bonus
+        
+        # 2. Calculate the Spoilage Penalty dynamically
+        spoilage_penalty = buffer_vars[n] * spoilage_rate * spoilage_weight
+
+        # 3. Add to the objective equation
+        objective_terms.append(
+            (buffer_vars[n] * node_score) + 
+            (capacity_upgrade[n] * node_score * 10) - 
+            spoilage_penalty  # <-- Subtracting the penalty!
+        )
+
+    # Apply the massive equation to the problem
+    problem += pulp.lpSum(objective_terms)
 
     # Solve
     problem.solve()
@@ -70,31 +86,31 @@ def optimize_network(G, budget=100):
     }
 
 
-def generate_recommendations(plan):
+def generate_recommendations(plan, G):
     """
     Convert optimization results into readable recommendations
+    using percentages of max capacity.
     """
-
     recommendations = []
     
-    for node,value in plan["buffers"].items():
-        if value >= 40:
-            recommendations.append(
-                f"Add alternate supplier upstream of {node}"
-            )
     for node, value in plan["buffers"].items():
-        if value is None:
+        if value is None or value <= 0:
             continue
+            
+        max_cap = G.nodes[node].get('max_capacity', 100)
+        utilization = value / max_cap if max_cap > 0 else 0
 
-        if value >= 25:
-            recommendations.append(f"Add large buffer stock at {node}")
-
-        elif value >= 10:
-            recommendations.append(f"Increase buffer stock at {node}")
+        if utilization >= 0.8:  # Using 80% of available space
+            recommendations.append(f"Add alternate supplier upstream of {node} (Buffer maxed out)")
+        elif utilization >= 0.5: # Using 50% of available space
+            recommendations.append(f"Add large buffer stock at {node} (+{int(value)} units)")
+        elif utilization > 0:
+            recommendations.append(f"Increase buffer stock at {node} (+{int(value)} units)")
 
     for node, value in plan["capacity_upgrades"].items():
         if value == 1:
-            recommendations.append(f"Upgrade production capacity at {node}")
+            boost = G.nodes[node].get('upgrade_capacity_boost', 'additional')
+            recommendations.append(f"Upgrade production capacity at {node} (Gain {boost} capacity)")
 
     return recommendations
 
@@ -116,15 +132,18 @@ def find_critical_nodes(G, top_k=2):
 
     return [node for node,_ in sorted_nodes[:top_k]]
 
-def run_optimizer(G, budget=100):
+def run_optimizer(G, budget=100, shelf_life_days=365):
     """
     Main function called by backend API
     """
 
-    plan = optimize_network(G, budget)
+    # 1. Run the mathematical optimization
+    plan = optimize_network(G, budget, shelf_life_days)
 
-    recommendations = generate_recommendations(plan)
+    # 2. Generate human-readable recommendations (Now passing G!)
+    recommendations = generate_recommendations(plan, G)
 
+    # 3. Identify the structural bottlenecks
     critical_nodes = find_critical_nodes(G)
 
     return {
