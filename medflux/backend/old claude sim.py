@@ -133,35 +133,16 @@ def _simulate_pull(G, optimizer_flows, steps):
             for u, _, ed in in_edges:
                 edge     = (u, node)
                 edge_cap = float(ed.get("capacity", 100))
+                opt_cap  = opt_limits.get(edge, edge_cap)
+                eff_cap  = min(edge_cap, opt_cap)
+
+                share    = (edge_cap / total_cap) * need
+                request  = min(share, eff_cap)
+
                 upstream_inv = float(G.nodes[u].get("inventory", 0))
-                
-                # ✅ FIX BUG 2: Enforce optimizer flows as priority routing
-                opt_flow = opt_limits.get(edge, 0.0)
-                if opt_flow > 0:
-                    # Optimizer prescribes this route — use it first
-                    request = min(opt_flow, upstream_inv)
-                else:
-                    # Fallback: distribute proportionally across available edges
-                    opt_cap = opt_limits.get(edge, edge_cap)
-                    eff_cap = min(edge_cap, opt_cap)
-                    share = (edge_cap / total_cap) * need
-                    request = min(share, eff_cap)
-                
-                # ✅ FIX BUG 1: Adaptive safety stock to prevent starvation
-                node_type = G.nodes[u].get("type", "unknown")
-                is_source = node_type == "supplier" or len(list(G.in_edges(u))) == 0
-                
-                if is_source:
-                    safety = 0.0
-                else:
-                    # Emergency mode: reduce safety stock if inventory critically low
-                    capacity = float(G.nodes[u].get("max_capacity", 100))
-                    inv_ratio = upstream_inv / capacity if capacity > 0 else 0
-                    if inv_ratio < 0.20:  # Below 20% capacity: zero out safety stock
-                        safety = 0.0
-                    else:
-                        safety = capacity * 0.03
-                
+                # Non-source nodes keep 3% safety stock
+                is_source = len(list(G.in_edges(u))) == 0
+                safety    = 0.0 if is_source else float(G.nodes[u].get("max_capacity", 100)) * 0.03
                 available = max(0.0, upstream_inv - safety)
                 fulfilled = min(request, available)
 
@@ -295,22 +276,6 @@ def _compute_metrics(history, G_ref, nodes):
 def run_simulation(G, plan, steps=DEFAULT_STEPS, shocked_node=None, shock_magnitude=0.0):
     if not G or len(G.nodes) == 0:
         raise ValueError("Graph is empty — cannot run simulation.")
-    
-    # ✅ FIX BUG 5: Validate all nodes have demand attribute
-    for node in G.nodes:
-        if "demand" not in G.nodes[node]:
-            raise ValueError(
-                f"Node '{node}' missing 'demand' attribute. "
-                "All nodes must have demand (even if 0)."
-            )
-    
-    # ✅ FIX BUG 5: Validate all edges have delivery_time attribute
-    for u, v in G.edges:
-        if "delivery_time" not in G.edges[u, v]:
-            raise ValueError(
-                f"Edge {u}->{v} missing 'delivery_time' attribute. "
-                "All edges must have delivery_time (default: 1)."
-            )
 
     nodes     = list(G.nodes)
     opt_flows = plan.get("edge_flows", {}) if plan else {}
@@ -321,16 +286,6 @@ def run_simulation(G, plan, steps=DEFAULT_STEPS, shocked_node=None, shock_magnit
     G_opt             = apply_plan(G, plan) if plan else copy.deepcopy(G)
     optimized_ts      = _simulate_pull(G_opt, optimizer_flows=opt_flows, steps=steps)
     optimized_metrics = _compute_metrics(optimized_ts, G_opt, nodes)
-
-    # ✅ FIX BUG 4: Detect if optimization degraded performance
-    baseline_shortage = baseline_metrics["peak_shortage"]
-    optimized_shortage = optimized_metrics["peak_shortage"]
-    
-    if optimized_shortage > baseline_shortage * 1.05:  # 5% tolerance
-        print(f"⚠️  WARNING: Optimization DEGRADED network resilience!")
-        print(f"   Baseline peak shortage:  {baseline_shortage:.2f}")
-        print(f"   Optimized peak shortage: {optimized_shortage:.2f}")
-        print(f"   Degradation: +{(optimized_shortage - baseline_shortage):.2f} units")
 
     ml_result = {}
     if shocked_node:
