@@ -7,7 +7,7 @@ import {
 } from './types';
 import { MEDICAL_RESOURCES, generateMockNetwork } from './mockData';
 import { supabase } from './supabaseClient'; // Make sure this path is correct!
-
+import { Session } from '@supabase/supabase-js';
 interface SelectedEntity {
   type: 'node' | 'edge';
   id: string;
@@ -40,11 +40,35 @@ interface MedFluxState {
   updateEdge: (id: string, updates: Partial<NetworkEdge>) => void;
   deleteEntity: () => void;
   addNode: () => void;
+  session: Session | null;
+  isLoadingAuth: boolean;
+  logout: () => Promise<void>;
 }
 
 const MedFluxContext = createContext<MedFluxState | undefined>(undefined);
 
 export const MedFluxProvider = ({ children }: { children: React.ReactNode }) => {
+  const [session, setSession] = useState<Session | null>(null);
+  const [isLoadingAuth, setIsLoadingAuth] = useState(true);
+
+  useEffect(() => {
+    // Check initial session
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      setSession(session);
+      setIsLoadingAuth(false);
+    });
+
+    // Listen for logins/logouts
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+      setSession(session);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+  const logout = async () => {
+    await supabase.auth.signOut();
+  };
   const [settings, setSettings] = useState<ScenarioSettings>({
     budget: 50000,
     shock_type_selected: 'Facility Offline',
@@ -286,6 +310,9 @@ export const MedFluxProvider = ({ children }: { children: React.ReactNode }) => 
   return (
     <MedFluxContext.Provider
       value={{
+        session,          // <-- Add this
+        isLoadingAuth,    // <-- Add this
+        logout,
         // Cloud functions exposed to the rest of the app
         savedNetworks,
         fetchSavedNetworks,

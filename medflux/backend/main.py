@@ -426,11 +426,123 @@ gemini-3.1-flash-lite-preview
 
 # handler = Mangum(app)
 
+# import os
+# import google.generativeai as genai
+# from fastapi import FastAPI, HTTPException
+# from pydantic import BaseModel, Field
+# from fastapi.middleware.cors import CORSMiddleware
+# from typing import List, Optional
+# import networkx as nx
+# from mangum import Mangum
+
+# from optimizer import run_optimizer
+# from network_loader import load_network, resolve_shock_type, find_shocked_node
+# from simulation import run_simulation, inject_shock
+
+# app = FastAPI()
+
+# # Allow all origins so judges can run it from any local or web environment
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["*"],
+#     allow_credentials=True,
+#     allow_methods=["*"],
+#     allow_headers=["*"],
+# )
+
+# # --- CONFIG ---
+# GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+# if GEMINI_API_KEY:
+#     genai.configure(api_key=GEMINI_API_KEY)
+
+# # ============================================================
+# # 1.  DATA MODELS
+# # ============================================================
+
+# class ScenarioSettings(BaseModel):
+#     budget: float
+#     shock_type_selected: str
+#     specific_resource: str
+#     shelf_life_days: int
+#     shocked_node_id: Optional[str] = None
+#     shock_magnitude: float = Field(default=0.5, ge=0.0, le=1.0)
+#     simulation_steps: int = Field(default=30, ge=1, le=365)
+
+# class NodeData(BaseModel):
+#     id: str
+#     type: str
+#     inventory: int
+#     max_capacity: int
+#     demand: int
+#     holding_cost_per_unit: float
+#     is_shocked: bool
+#     processing_duration: int = 1
+#     fixed_upgrade_cost: int = 0
+#     upgrade_capacity_boost: int = 0
+
+# class EdgeData(BaseModel):
+#     source: str; target: str; capacity: int; delivery_time: int; shipping_cost_per_unit: float
+
+# class NetworkPayload(BaseModel):
+#     scenario_settings: ScenarioSettings; nodes: List[NodeData]; edges: List[EdgeData]
+
+# # ============================================================
+# # 2.  GEMINI SUMMARY
+# # ============================================================
+
+# def get_ai_summary(settings, plan):
+#     if not GEMINI_API_KEY:
+#         return "Optimization complete. Rerouting logic engaged to protect critical nodes."
+#     try:
+#         model = genai.GenerativeModel('gemini-2.0-flash-lite-preview-02-05')
+#         prompt = f"MedFlux AI: A {settings.shock_magnitude*100}% {settings.shock_type_selected} shock occurred. Plan: {plan}. Summarize in 2 sentences for a hospital director. No markdown. Max 35 words."
+#         return model.generate_content(prompt).text.strip()
+#     except:
+#         return "Logistics stabilized. Inventory rerouted from supply hubs to at-risk hospital facilities."
+
+# # ============================================================
+# # 3.  OPEN ENDPOINTS (No Auth Required for Judges)
+# # ============================================================
+
+# @app.get("/")
+# def read_root():
+#     return {"status": "MedFlux API is Live (Open Access for Evaluation)"}
+
+# @app.post("/simulate")
+# def simulate_endpoint(payload: NetworkPayload): # <-- Dependency removed
+#     try:
+#         setts = payload.scenario_settings
+#         G = load_network(payload.nodes, payload.edges)
+        
+#         target = setts.shocked_node_id or find_shocked_node(G)
+#         if target:
+#             inject_shock(G, target, resolve_shock_type(setts.shock_type_selected), setts.shock_magnitude)
+        
+#         plan = run_optimizer(G, budget=setts.budget, shelf_life_days=setts.shelf_life_days)
+#         sim_res = run_simulation(G=G, plan=plan, steps=setts.simulation_steps, shocked_node=target, shock_magnitude=setts.shock_magnitude)
+        
+#         return {
+#             **sim_res,
+#             "optimization_plan": plan,
+#             "executive_summary": get_ai_summary(setts, plan)
+#         }
+#     except Exception as e:
+#         print(f"Error: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+# handler = Mangum(app)
 import os
-import google.generativeai as genai
-from fastapi import FastAPI, HTTPException
+os.environ["LOKY_MAX_CPU_COUNT"] = "1"
+
+import traceback
+from google import genai
+from google.genai import types
+import jwt
+from fastapi import FastAPI, HTTPException, Depends, Request, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+# from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from fastapi.middleware.cors import CORSMiddleware
 from typing import List, Optional
 import networkx as nx
 from mangum import Mangum
@@ -439,24 +551,60 @@ from optimizer import run_optimizer
 from network_loader import load_network, resolve_shock_type, find_shocked_node
 from simulation import run_simulation, inject_shock
 
-app = FastAPI()
-
-# Allow all origins so judges can run it from any local or web environment
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # --- CONFIG ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
+
+gemini_client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+app = FastAPI()
+
+# app.add_middleware(
+#     CORSMiddleware,
+#     allow_origins=["https://medflux-ui.vercel.app", "http://localhost:5173", "http://localhost:3000"],
+#     allow_credentials=False,
+#     allow_methods=["POST", "OPTIONS"],
+#     allow_headers=["Content-Type", "Authorization"],
+# )
+
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": str(exc), "trace": traceback.format_exc()},
+        headers={"Access-Control-Allow-Origin": "https://medflux-ui.vercel.app"}
+    )
+
+app.add_exception_handler(Exception, global_exception_handler)
+
+# --- AUTH ---
+security = HTTPBearer()
+from jwt.algorithms import ECAlgorithm
+import json
+
+SUPABASE_JWK = os.environ.get("SUPABASE_JWK")
+
+def verify_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if not SUPABASE_JWK:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="SUPABASE_JWK is missing.")
+    token = credentials.credentials
+    try:
+        public_key = ECAlgorithm.from_jwk(SUPABASE_JWK)
+        payload = jwt.decode(
+            token,
+            public_key,
+            algorithms=["ES256"],
+            options={"verify_aud": False}
+        )
+        return payload
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired.")
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=f"Invalid token: {str(e)}")
+
 
 # ============================================================
-# 1.  DATA MODELS
+# DATA MODELS
 # ============================================================
 
 class ScenarioSettings(BaseModel):
@@ -481,46 +629,65 @@ class NodeData(BaseModel):
     upgrade_capacity_boost: int = 0
 
 class EdgeData(BaseModel):
-    source: str; target: str; capacity: int; delivery_time: int; shipping_cost_per_unit: float
+    source: str
+    target: str
+    capacity: int
+    delivery_time: int
+    shipping_cost_per_unit: float
 
 class NetworkPayload(BaseModel):
-    scenario_settings: ScenarioSettings; nodes: List[NodeData]; edges: List[EdgeData]
+    scenario_settings: ScenarioSettings
+    nodes: List[NodeData]
+    edges: List[EdgeData]
 
 # ============================================================
-# 2.  GEMINI SUMMARY
+# GEMINI SUMMARY
 # ============================================================
 
 def get_ai_summary(settings, plan):
-    if not GEMINI_API_KEY:
+    if not gemini_client:
         return "Optimization complete. Rerouting logic engaged to protect critical nodes."
     try:
-        model = genai.GenerativeModel('gemini-2.0-flash-lite-preview-02-05')
         prompt = f"MedFlux AI: A {settings.shock_magnitude*100}% {settings.shock_type_selected} shock occurred. Plan: {plan}. Summarize in 2 sentences for a hospital director. No markdown. Max 35 words."
-        return model.generate_content(prompt).text.strip()
+        response = gemini_client.models.generate_content(
+            model="gemini-3.1-flash-lite-preview",
+            contents=prompt
+        )
+        return response.text.strip()
     except:
         return "Logistics stabilized. Inventory rerouted from supply hubs to at-risk hospital facilities."
 
 # ============================================================
-# 3.  OPEN ENDPOINTS (No Auth Required for Judges)
+# ENDPOINTS
 # ============================================================
 
 @app.get("/")
 def read_root():
-    return {"status": "MedFlux API is Live (Open Access for Evaluation)"}
+    return {"status": "MedFlux API is Live (Secure)"}
+
+# @app.options("/simulate")
+# async def options_simulate():
+#     return JSONResponse(
+#         content={},
+#         status_code=204,
+#         headers={
+#             "Access-Control-Allow-Origin": "https://medflux-ui.vercel.app",
+#             "Access-Control-Allow-Methods": "POST, OPTIONS",
+#             "Access-Control-Allow-Headers": "Content-Type, Authorization",
+#         }
+#     )
 
 @app.post("/simulate")
-def simulate_endpoint(payload: NetworkPayload): # <-- Dependency removed
+def simulate_endpoint(payload: NetworkPayload, user: dict = Depends(verify_user)):
     try:
         setts = payload.scenario_settings
         G = load_network(payload.nodes, payload.edges)
-        
         target = setts.shocked_node_id or find_shocked_node(G)
         if target:
             inject_shock(G, target, resolve_shock_type(setts.shock_type_selected), setts.shock_magnitude)
-        
         plan = run_optimizer(G, budget=setts.budget, shelf_life_days=setts.shelf_life_days)
-        sim_res = run_simulation(G=G, plan=plan, steps=setts.simulation_steps, shocked_node=target, shock_magnitude=setts.shock_magnitude)
-        
+        sim_res = run_simulation(G=G, plan=plan, steps=setts.simulation_steps,
+            shocked_node=target, shock_magnitude=setts.shock_magnitude)
         return {
             **sim_res,
             "optimization_plan": plan,
